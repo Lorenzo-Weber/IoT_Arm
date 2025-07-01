@@ -5,7 +5,7 @@ from vision_controller import VisionController, detect_gripper, calculate_wrist_
 
 def main():
     # Configurações
-    MQTT_BROKER = 'localhost'  # Altere para IP do seu broker
+    MQTT_BROKER = '192.168.2.145'
     MQTT_PORT = 1883
     
     # Estados da máquina de estados
@@ -19,7 +19,7 @@ def main():
     arm_controller = MQTTRoboticArmController(
         mqtt_broker=MQTT_BROKER,
         mqtt_port=MQTT_PORT,
-        client_id='robot_arm_vision_v2'
+        client_id='CAMERACONTROLLER'
     )
     vision_controller = VisionController()
     

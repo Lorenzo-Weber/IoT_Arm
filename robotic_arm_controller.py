@@ -12,6 +12,8 @@ class MQTTRoboticArmController:
         self.pid_elbow = PIDController(kp=1.8, ki=0.08, kd=0.3)
         self.pid_wrist = PIDController(kp=1.5, ki=0.05, kd=0.25)
         self.pid_gripper = PIDController(kp=1.2, ki=0.03, kd=0.15)
+
+        self.ids = ["base", "ombro", "cotovelo", "pulso", "garra"]
         
         self.current_angles = [90, 90, 90, 90, 0]  # Posições atuais estimadas
         self.target_angles = [90, 90, 90, 90, 0]   # Posições desejadas
@@ -42,13 +44,6 @@ class MQTTRoboticArmController:
         self.mqtt_client.on_connect = self.on_mqtt_connect
         self.mqtt_client.on_message = self.on_mqtt_message
         
-        # Tópicos MQTT
-        self.topics = {
-            'command': 'robot/servo/absolute',     # Comando de ângulos absolutos
-            'feedback': 'robot/servo/feedback',    # Feedback de posições
-            'status': 'robot/status'               # Status geral
-        }
-        
         # Conecta ao broker MQTT
         self.connect_mqtt(mqtt_broker, mqtt_port)
     
@@ -66,11 +61,14 @@ class MQTTRoboticArmController:
         """Callback de conexão MQTT"""
         if rc == 0:
             print("MQTT conectado com sucesso")
-            client.subscribe(self.topics['feedback'])
-            client.subscribe(self.topics['status'])
+            # Subscreve aos tópicos de feedback de cada servo
+            for servo_id in self.ids:
+                feedback_topic = f'braco/servo/{servo_id}/pos'
+                client.subscribe(feedback_topic)
+                print(f"Subscrito ao tópico: {feedback_topic}")
             
-            # Solicita posição atual do ESP32
-            self.request_current_position()
+            # Remove a solicitação automática de posição para evitar envio de dados desnecessários
+            print("Aguardando feedback dos servos...")
         else:
             print(f"Falha na conexao MQTT: codigo {rc}")
     
@@ -78,31 +76,31 @@ class MQTTRoboticArmController:
         """Processa mensagens MQTT"""
         try:
             topic = msg.topic
-            payload = json.loads(msg.payload.decode())
+            # Recebe apenas o ângulo como string, não JSON
+            angle_str = msg.payload.decode()
+            angle_value = float(angle_str)
             
-            if topic == self.topics['feedback']:
-                # Atualiza posições reais do ESP32
-                self.esp32_angles = payload['angles']
-                self.position_updated = True
-                self.last_feedback_time = time.time()
-                
-                # Verifica conclusão do movimento
-                if self.is_moving and self.check_movement_complete():
-                    self.is_moving = False
-                    print("Movimento concluído")
-                        
-            elif topic == self.topics['status']:
-                if payload.get('ready', False):
-                    self.is_moving = False
+            # Verifica se é feedback de posição de algum servo
+            for i, servo_id in enumerate(self.ids):
+                feedback_topic = f'braco/servo/{servo_id}/pos'
+                if topic == feedback_topic:
+                    # Atualiza posição específica do servo
+                    self.esp32_angles[i] = angle_value
+                    self.position_updated = True
+                    self.last_feedback_time = time.time()
+                    
+                    # Verifica conclusão do movimento
+                    if self.is_moving and self.check_movement_complete():
+                        self.is_moving = False
+                        print("Movimento concluído")
+                    break
                     
         except Exception as e:
             print(f"Erro ao processar MQTT: {e}")
     
     def request_current_position(self):
-        """Solicita posição atual do ESP32"""
-        if self.mqtt_client:
-            request = {'action': 'get_position', 'timestamp': time.time()}
-            self.mqtt_client.publish('robot/request', json.dumps(request))
+        """Remove função que enviava JSON desnecessário"""
+        pass
     
     def check_movement_complete(self):
         """Verifica se movimento foi concluído com base no feedback"""
@@ -178,25 +176,24 @@ class MQTTRoboticArmController:
     def send_absolute_angles(self, angles):
         """Envia ângulos absolutos para ESP32 via MQTT"""
         if self.mqtt_client:
-            rounded_angles = [round(angle, 1) for angle in angles]
+            # Arredonda para valores inteiros
+            rounded_angles = [int(round(angle)) for angle in angles]
             
-            command = {
-                'angles': rounded_angles,
-                'mode': 'absolute',
-                'timestamp': time.time(),
-                'sequence': int(time.time() * 1000) % 100000
-            }
+            # Envia comando para cada servo individualmente
+            for i, (servo_id, angle) in enumerate(zip(self.ids, rounded_angles)):
+                command_topic = f'controle/abs/{servo_id}'
+                
+                # Envia apenas o ângulo como string inteira
+                message = str(angle)
+                result = self.mqtt_client.publish(command_topic, message)
+                
+                if result.rc != 0:
+                    print(f"Falha no envio MQTT para {servo_id}: {result.rc}")
             
             self.command_angles = rounded_angles
-            message = json.dumps(command)
-            
-            result = self.mqtt_client.publish(self.topics['command'], message)
-            if result.rc == 0:
-                print(f"ESP32: {[f'{a:.1f}°' for a in rounded_angles]}")
-            else:
-                print(f"Falha no envio MQTT: {result.rc}")
+            print(f"ESP32: {[f'{self.ids[i]}={a}°' for i, a in enumerate(rounded_angles)]}")
         else:
-            print(f"Simulação: {[f'{a:.1f}°' for a in angles]}")
+            print(f"Simulação: {[f'{self.ids[i]}={int(round(a))}°' for i, a in enumerate(angles)]}")
     
     def is_at_target(self, target_x, target_y, target_z, wrist_angle, gripper_angle, tolerance=5):
         """Verifica se está na posição alvo"""
@@ -224,10 +221,21 @@ class MQTTRoboticArmController:
         """Move um servo específico para ângulo absoluto"""
         if 0 <= servo_index < 5:
             target_angle = np.clip(target_angle, 0, 180)
-            new_angles = self.current_angles.copy()
-            new_angles[servo_index] = target_angle
-            self.send_absolute_angles(new_angles)
-            print(f"Servo {servo_index} → {target_angle:.1f}°")
+            servo_id = self.ids[servo_index]
+            command_topic = f'controle/abs/{servo_id}'
+            
+            if self.mqtt_client:
+                # Envia apenas o ângulo como string inteira
+                message = str(int(round(target_angle)))
+                result = self.mqtt_client.publish(command_topic, message)
+                if result.rc == 0:
+                    print(f"Servo {servo_id} → {int(round(target_angle))}°")
+                    self.current_angles[servo_index] = int(round(target_angle))
+                    self.command_angles[servo_index] = int(round(target_angle))
+                else:
+                    print(f"Falha no envio MQTT para {servo_id}: {result.rc}")
+            else:
+                print(f"Simulação - Servo {servo_id} → {int(round(target_angle))}°")
     
     def close_gripper(self):
         """Fecha garra"""
@@ -272,11 +280,10 @@ class MQTTRoboticArmController:
     def emergency_stop(self):
         """Para todos os movimentos"""
         if self.mqtt_client:
-            stop_command = {
-                'emergency_stop': True,
-                'timestamp': time.time()
-            }
-            self.mqtt_client.publish(self.topics['command'], json.dumps(stop_command))
+            # Envia parada de emergência para todos os servos (volta para posição neutra)
+            for servo_id in self.ids:
+                stop_topic = f'controle/abs/{servo_id}'
+                self.mqtt_client.publish(stop_topic, "90")
         self.is_moving = False
         print("PARADA DE EMERGENCIA")
     
