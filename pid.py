@@ -24,24 +24,18 @@ class PIDController:
         if dt <= 0:
             dt = 1e-6  # Evita divisão por zero
             
-        # Calcula o erro
         error = self.setpoint - current_value
         
-        # Termo Proporcional
         proportional = self.kp * error
         
-        # Termo Integral
         self.integral += error * dt
         integral_term = self.ki * self.integral
         
-        # Termo Derivativo
         derivative = (error - self.previous_error) / dt
         derivative_term = self.kd * derivative
         
-        # Saída PID
         output = proportional + integral_term + derivative_term
         
-        # Atualiza valores para próxima iteração
         self.previous_error = error
         self.previous_time = current_time
         
@@ -57,35 +51,25 @@ class PIDController:
 
 class GripperController:
     def __init__(self):
-        # PIDs para cada eixo da garra
         self.pid_x = PIDController(kp=1.5, ki=0.1, kd=0.3)
         self.pid_y = PIDController(kp=1.5, ki=0.1, kd=0.3)
         self.pid_angle = PIDController(kp=2.0, ki=0.05, kd=0.4)
         
-        # Limites de velocidade
         self.max_velocity = 50  # mm/s
         self.max_angular_velocity = 30  # graus/s
         
     def move_to_target(self, current_pos, target_pos):
-        """
-        Move a garra para a posição alvo usando controle PID
-        current_pos: (x, y, angle) posição atual
-        target_pos: (x, y, angle) posição desejada
-        """
         cx, cy, current_angle = current_pos
         tx, ty, target_angle = target_pos
         
-        # Atualiza setpoints
         self.pid_x.set_setpoint(tx)
         self.pid_y.set_setpoint(ty)
         self.pid_angle.set_setpoint(target_angle)
         
-        # Calcula correções PID
         correction_x = self.pid_x.update(cx)
         correction_y = self.pid_y.update(cy)
         correction_angle = self.pid_angle.update(current_angle)
         
-        # Limita velocidades
         correction_x = np.clip(correction_x, -self.max_velocity, self.max_velocity)
         correction_y = np.clip(correction_y, -self.max_velocity, self.max_velocity)
         correction_angle = np.clip(correction_angle, -self.max_angular_velocity, self.max_angular_velocity)
@@ -93,9 +77,6 @@ class GripperController:
         return correction_x, correction_y, correction_angle
     
     def is_at_target(self, current_pos, target_pos, tolerance=5):
-        """
-        Verifica se a garra chegou na posição alvo
-        """
         cx, cy, current_angle = current_pos
         tx, ty, target_angle = target_pos
         
@@ -105,9 +86,6 @@ class GripperController:
         return distance_error < tolerance and angle_error < 5
     
 def detect_gripper(frame):
-    """
-    Detecta a garra vermelha e retorna sua posição e orientação
-    """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
     # Faixa de cor vermelha para a garra
@@ -212,15 +190,7 @@ class MQTTRoboticArmController:
         self.l2 = 100  
         self.l3 = 50
         
-        # Controle de timing otimizado
-        self.movement_delay = 0.15  # Delay entre comandos MQTT (mais rápido)
-        self.last_command_time = 0
-        self.position_tolerance = 2  # Tolerância mais precisa
-        self.movement_timeout = 8.0
-        
         # Estado de movimento
-        self.is_moving = False
-        self.movement_start_time = 0
         self.position_updated = False
         self.last_feedback_time = 0
         
@@ -272,15 +242,9 @@ class MQTTRoboticArmController:
                 self.esp32_angles = payload['angles']
                 self.position_updated = True
                 self.last_feedback_time = time.time()
-                
-                # Verifica conclusão do movimento
-                if self.is_moving and self.check_movement_complete():
-                    self.is_moving = False
-                    print("Movimento concluído")
                         
             elif topic == self.topics['status']:
-                if payload.get('ready', False):
-                    self.is_moving = False
+                pass  # Remove lógica de movimento
                     
         except Exception as e:
             print(f"Erro ao processar MQTT: {e}")
@@ -291,22 +255,10 @@ class MQTTRoboticArmController:
             request = {'action': 'get_position', 'timestamp': time.time()}
             self.mqtt_client.publish('robot/request', json.dumps(request))
     
-    def check_movement_complete(self):
-        """Verifica se movimento foi concluído com base no feedback"""
-        for esp32_angle, target_angle in zip(self.esp32_angles, self.command_angles):
-            if abs(esp32_angle - target_angle) > self.position_tolerance:
-                return False
-        return True
-    
     def move_to_position(self, target_x, target_y, target_z, wrist_angle, gripper_angle):
         """
         Move braço para posição 3D usando ângulos absolutos
         """
-        # Rate limiting
-        current_time = time.time()
-        if current_time - self.last_command_time < self.movement_delay:
-            return [0, 0, 0, 0, 0]
-        
         try:
             # Calcula ângulos alvo da cinemática inversa
             target_angles = list(inverse_kinematics_5dof(
@@ -342,21 +294,9 @@ class MQTTRoboticArmController:
                 final_angle = np.clip(desired_angle, 0, 180)
                 new_angles.append(final_angle)
             
-            # Verifica se mudança é significativa (economiza tráfego MQTT)
-            significant_change = any(
-                abs(new - current) > 0.5 
-                for new, current in zip(new_angles, current_positions)
-            )
-            
-            if significant_change:
-                self.current_angles = new_angles
-                self.send_absolute_angles(new_angles)
-                self.last_command_time = current_time
-                
-                # Só marca como "movendo" se mudança for grande
-                if any(abs(new - current) > 2 for new, current in zip(new_angles, current_positions)):
-                    self.is_moving = True
-                    self.movement_start_time = current_time
+            # Envia sempre os novos ângulos
+            self.current_angles = new_angles
+            self.send_absolute_angles(new_angles)
             
             return corrections
             
@@ -392,9 +332,6 @@ class MQTTRoboticArmController:
     
     def is_at_target(self, target_x, target_y, target_z, wrist_angle, gripper_angle, tolerance=5):
         """Verifica se está na posição alvo"""
-        if self.is_moving:
-            return False
-            
         try:
             target_angles = inverse_kinematics_5dof(
                 target_x, target_y, target_z, 
@@ -427,40 +364,22 @@ class MQTTRoboticArmController:
         """Fecha garra (ângulo absoluto)"""
         print("Fechando garra...")
         self.move_servo_absolute(4, 90)  # Servo 4 para 90°
-        self.wait_for_movement(timeout=2.0)
-    
+
     def open_gripper(self):
         """Abre garra (ângulo absoluto)"""
         print("Abrindo garra...")
         self.move_servo_absolute(4, 0)   # Servo 4 para 0°
-        self.wait_for_movement(timeout=2.0)
-    
-    def wait_for_movement(self, timeout=None):
-        """Aguarda movimento com timeout"""
-        if timeout is None:
-            timeout = self.movement_timeout
-            
-        start_time = time.time()
-        while self.is_moving and (time.time() - start_time) < timeout:
-            time.sleep(0.05)
-            
-        if self.is_moving:
-            print("Timeout - continuando...")
-            self.is_moving = False
-            return False
-        return True
-    
+
     def get_health_status(self):
         """Retorna status de saúde da conexão"""
         current_time = time.time()
         mqtt_ok = self.mqtt_client and self.mqtt_client.is_connected()
-        feedback_ok = (current_time - self.last_feedback_time) < 5.0 if self.position_updated else False
+        feedback_ok = (current_time - self.last_feedback_time) < 0.1 if self.position_updated else False
         
         return {
             'mqtt_connected': mqtt_ok,
             'feedback_recent': feedback_ok,
-            'position_updated': self.position_updated,
-            'is_moving': self.is_moving
+            'position_updated': self.position_updated
         }
     
 class VisionController:
@@ -520,7 +439,6 @@ try:
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
         green_contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Detecta garra vermelha
         gx, gy, gripper_orientation, gripper_box = detect_gripper(frame)
         
         # Desenha detecções
@@ -558,36 +476,34 @@ try:
                         arm_controller.open_gripper()
                     
                     elif current_state == STATE_APPROACHING:
-                        if not arm_controller.is_moving:  # Só procede se não estiver se movendo
-                            wrist_angle = calculate_wrist_angle(cx, cy, gx, gy)
-                            approach_z = target_z + 30
-                            
-                            corrections = arm_controller.move_to_position(
-                                target_x, target_y, approach_z, wrist_angle, 0
-                            )
-                            
-                            if arm_controller.is_at_target(target_x, target_y, approach_z, wrist_angle, 0):
-                                print("Posicao de aproximacao alcancada - Descendo...")
-                                current_state = STATE_GRASPING
-                                state_change_time = current_time
+                        wrist_angle = calculate_wrist_angle(cx, cy, gx, gy)
+                        approach_z = target_z + 30
+                        
+                        corrections = arm_controller.move_to_position(
+                            target_x, target_y, approach_z, wrist_angle, 0
+                        )
+                        
+                        if arm_controller.is_at_target(target_x, target_y, approach_z, wrist_angle, 0):
+                            print("Posicao de aproximacao alcancada - Descendo...")
+                            current_state = STATE_GRASPING
+                            state_change_time = current_time
                     
                     elif current_state == STATE_GRASPING:
-                        if not arm_controller.is_moving:
-                            wrist_angle = calculate_wrist_angle(cx, cy, gx, gy)
-                            
-                            corrections = arm_controller.move_to_position(
-                                target_x, target_y, target_z, wrist_angle, 0
-                            )
-                            
-                            if arm_controller.is_at_target(target_x, target_y, target_z, wrist_angle, 0):
-                                print("Fechando garra...")
-                                arm_controller.close_gripper()
-                                current_state = STATE_LIFTING
-                                state_change_time = current_time
-                                gripper_closed = True
+                        wrist_angle = calculate_wrist_angle(cx, cy, gx, gy)
+                        
+                        corrections = arm_controller.move_to_position(
+                            target_x, target_y, target_z, wrist_angle, 0
+                        )
+                        
+                        if arm_controller.is_at_target(target_x, target_y, target_z, wrist_angle, 0):
+                            print("Fechando garra...")
+                            arm_controller.close_gripper()
+                            current_state = STATE_LIFTING
+                            state_change_time = current_time
+                            gripper_closed = True
                     
                     elif current_state == STATE_LIFTING:
-                        if gripper_closed and not arm_controller.is_moving:
+                        if gripper_closed:
                             lift_z = target_z + 50
                             wrist_angle = calculate_wrist_angle(cx, cy, gx, gy)
                             
@@ -627,7 +543,7 @@ try:
         if health['feedback_recent']:
             angles_text = f"ESP32: {[f'{a:.0f}°' for a in arm_controller.esp32_angles]}"
             cv2.putText(frame, angles_text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-        
+
         # Indicador de movimento
         if health['is_moving']:
             cv2.putText(frame, "Movendo...", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
